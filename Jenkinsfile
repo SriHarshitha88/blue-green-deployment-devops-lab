@@ -76,15 +76,26 @@ pipeline {
             steps {
                 script {
                     echo "Running basic container health test..."
-                    def result = sh(script: """
-                        set +e
-                        HEALTH_ID=\$(docker run -d -p 3000:3000 ${env.IMAGE_TAG})
-                        sleep 5
-                        curl -f http://host.docker.internal:3000/health || true
-                        docker stop \$HEALTH_ID || true
-                        set -e
-                    """, returnStatus: true)
-                    echo (result == 0) ? "✅ Health test passed" : "⚠️ Health test had minor issues (continuing)"
+
+                    def result = sh(
+                        script: """
+                            set +e
+                            HEALTH_ID=\$(docker run -d -p 3000:3000 ${env.IMAGE_TAG})
+                            sleep 5
+                            curl -f http://host.docker.internal:3000/health
+                            CODE=\$?
+                            docker stop \$HEALTH_ID || true
+                            set -e
+                            exit \$CODE
+                        """,
+                        returnStatus: true
+                    )
+
+                    if (result == 0) {
+                        echo "✅ Health test passed"
+                    } else {
+                        echo "⚠️ Health test had minor issues (continuing)"
+                    }
                 }
             }
         }
@@ -128,24 +139,78 @@ pipeline {
             }
         }
 
+        stage('Deploy to Target Environment') {
+            steps {
+                script {
+                    sh """
+                        # Stop and remove existing container
+                        docker rm -f blue-green-deployment-app-${env.TARGET_ENV}-1 2>/dev/null || true
+
+                        # Create network if needed
+                        if ! docker network ls | grep -q "blue-green-deployment_blue-green-network"; then
+                            docker network create blue-green-deployment_blue-green-network
+                        fi
+
+                        # Deploy container with network alias
+                        echo "Deploying to ${env.TARGET_ENV} environment..."
+                        docker run -d \\
+                            --name blue-green-deployment-app-${env.TARGET_ENV}-1 \\
+                            --network blue-green-deployment_blue-green-network \\
+                            --network-alias app-${env.TARGET_ENV} \\
+                            -p ${env.TARGET_ENV == 'blue' ? 3001 : 3002}:3000 \\
+                            -e COLOR=${env.TARGET_ENV.toUpperCase()} \\
+                            -e VERSION=${env.VERSION} \\
+                            ${env.IMAGE_TAG}
+
+                        echo "✅ Container deployed successfully"
+                    """
+                }
+            }
+        }
+
         stage('Switch Traffic') {
             steps {
                 input message: "Switch traffic to ${env.TARGET_ENV.toUpperCase()}?", ok: "Switch"
 
                 script {
+                    // Generate Nginx configuration
+                    def nginxConfig = """
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream app_servers {
+        server app-${env.TARGET_ENV}:3000;
+    }
+
+    server {
+        listen 80;
+        location / {
+            proxy_pass http://app_servers;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        }
+    }
+}
+"""
+                    writeFile file: 'nginx-temp.conf', text: nginxConfig
+
                     sh """
-                        # Clean existing nginx if it blocks port 80
+                        # Clean existing nginx
                         docker rm -f nginx 2>/dev/null || true
-                        docker rm -f blue_green_deployment-nginx-1 2>/dev/null || true
                         sleep 2
 
-                        # Recreate nginx container cleanly
+                        # Create nginx container
                         docker run -d --name nginx -p 80:80 --network blue-green-deployment_blue-green-network nginx:alpine
                         sleep 2
+
+                        # Copy configuration and reload
                         docker cp nginx-temp.conf nginx:/etc/nginx/nginx.conf
                         docker exec nginx nginx -t
                         docker exec nginx nginx -s reload
-                        echo "✅ Nginx reloaded successfully and traffic switched"
+                        echo "✅ Nginx reloaded successfully and traffic switched to ${env.TARGET_ENV}"
                     """
                 }
             }
