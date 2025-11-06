@@ -112,7 +112,7 @@ pipeline {
                         echo "Waiting for container to start..."
                         for i in {1..10}; do
                             sleep 2
-                            if curl -f http://localhost:3000/health 2>/dev/null; then
+                            if curl -f http://host.docker.internal:3000/health 2>/dev/null; then
                                 echo "Health check passed after \$((i*2)) seconds!"
                                 docker stop \$HEALTH_STATUS
                                 echo "Container stopped successfully"
@@ -157,7 +157,7 @@ pipeline {
                 script {
                     // Check which environment is currently active
                     def currentUpstream = sh(
-                        script: 'curl -s http://nginx/ | grep -o "Current Environment: <strong>\\(BLUE\\|GREEN\\)</strong>" | grep -o "BLUE\\|GREEN" || echo "BLUE"',
+                        script: 'curl -s http://host.docker.internal:80/ 2>/dev/null | grep -o "Current Environment: <strong>\\(BLUE\\|GREEN\\)</strong>" | grep -o "BLUE\\|GREEN" || echo "BLUE"',
                         returnStdout: true
                     ).trim().toLowerCase()
 
@@ -204,23 +204,40 @@ pipeline {
             steps {
                 script {
                     // Wait for container to be healthy
-                    def maxAttempts = 30
+                    def maxAttempts = 12  // Reduced from 30 to fail faster
                     def attempt = 0
                     def targetPort = env.TARGET_ENV == 'blue' ? 3001 : 3002
 
                     echo "Checking health for ${env.TARGET_ENV} environment on port ${targetPort}"
 
+                    // First, check if container is actually running
+                    sh "docker ps | grep '3002' || echo 'No container found on port 3002'"
+
+                    // Check container logs if it exists
+                    sh "docker logs blue-green-deployment-app-${env.TARGET_ENV}-1 2>&1 | tail -10 || echo 'No logs found'"
+
                     while (attempt < maxAttempts) {
                         try {
+                            // Add verbose curl output
                             def healthResponse = sh(
-                                script: "curl -s http://localhost:${targetPort}/health",
+                                script: "curl -v http://host.docker.internal:${targetPort}/health 2>&1 || echo 'Connection failed'",
                                 returnStdout: true
                             ).trim()
+
+                            echo "Health check attempt ${attempt + 1} response:"
+                            echo healthResponse
 
                             if (healthResponse.contains('"status":"healthy"')) {
                                 echo "✅ Health check passed for ${env.TARGET_ENV} environment on attempt ${attempt + 1}"
                                 echo "Response: ${healthResponse}"
                                 break
+                            } else if (healthResponse.contains('Connection refused') || healthResponse.contains('Connection failed')) {
+                                echo "❌ Container not ready or not running on port ${targetPort}"
+                                if (attempt >= 2) {
+                                    // After 3 attempts, check container status
+                                    sh "docker ps | grep 'app-${env.TARGET_ENV}' || echo 'Container app-${env.TARGET_ENV} not found in docker ps'"
+                                    sh "docker logs blue-green-deployment-app-${env.TARGET_ENV}-1 2>&1 | tail -5 || echo 'No logs available'"
+                                }
                             } else {
                                 echo "Health check attempt ${attempt + 1}: Invalid response"
                             }
@@ -230,13 +247,17 @@ pipeline {
 
                         attempt++
                         if (attempt < maxAttempts) {
-                            echo "Waiting 5 seconds before next attempt..."
+                            echo "Waiting 5 seconds before next attempt... (${attempt}/${maxAttempts})"
                             sleep 5
                         }
                     }
 
                     if (attempt == maxAttempts) {
-                        error "❌ Health check failed after ${maxAttempts} attempts for ${env.TARGET_ENV} environment"
+                        echo "❌ Health check failed after ${maxAttempts} attempts for ${env.TARGET_ENV} environment"
+                        echo "Final debug information:"
+                        sh "docker ps | grep -E '(3001|3002|blue|green)' || echo 'No containers found'"
+                        sh "docker network ls | grep blue-green || echo 'No networks found'"
+                        error "Health check failed - container might not be running properly"
                     }
                 }
             }
@@ -250,13 +271,13 @@ pipeline {
 
                     sh """
                         # Test health endpoint
-                        curl -f http://localhost:${targetPort}/health || exit 1
+                        curl -f http://host.docker.internal:${targetPort}/health || exit 1
 
                         # Test info endpoint
-                        curl -f http://localhost:${targetPort}/info || exit 1
+                        curl -f http://host.docker.internal:${targetPort}/info || exit 1
 
                         # Test main endpoint
-                        curl -f http://localhost:${targetPort}/ || exit 1
+                        curl -f http://host.docker.internal:${targetPort}/ || exit 1
 
                         echo "Smoke tests passed for ${env.TARGET_ENV} environment"
                     """
@@ -316,8 +337,8 @@ http {
 
                     sh """
                         # Verify through Nginx proxy
-                        curl -f http://localhost/health || exit 1
-                        curl -f http://localhost/info | grep ${env.TARGET_ENV.toUpperCase()} || exit 1
+                        curl -f http://host.docker.internal/health || exit 1
+                        curl -f http://host.docker.internal/info | grep ${env.TARGET_ENV.toUpperCase()} || exit 1
 
                         echo "Validation successful - Traffic is now routed to ${env.TARGET_ENV}"
                     """
