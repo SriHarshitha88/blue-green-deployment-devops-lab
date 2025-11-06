@@ -176,19 +176,37 @@ pipeline {
                     // Deploy to target environment
                     sh """
                         cd ${WORKSPACE}
-                        # Stop target environment container if running
-                        docker-compose stop app-${env.TARGET_ENV} || true
+                        # Stop and remove existing container if running
+                        docker rm -f blue-green-deployment-app-${env.TARGET_ENV}-1 2>/dev/null || true
+                        docker-compose stop app-${env.TARGET_ENV} 2>/dev/null || true
 
                         # Pull new image (optional, use local if not available)
                         docker pull ${env.IMAGE_TAG} || echo "Using local image - Docker Hub pull failed"
 
-                        # Update docker-compose with new image
-                        sed -i 's|image: .*|image: ${env.IMAGE_TAG}|' docker-compose.yml
+                        # Create network if it doesn't exist
+                        if ! docker network ls | grep -q "blue-green-deployment_blue-green-network"; then
+                            docker network create blue-green-deployment_blue-green-network
+                        fi
 
-                        # Start target environment with new image
-                        export COLOR=${env.TARGET_ENV.toUpperCase()}
-                        export VERSION=${env.VERSION}
-                        docker-compose up -d app-${env.TARGET_ENV}
+                        # Run container directly with proper network configuration
+                        echo "Starting ${env.TARGET_ENV} container with network configuration..."
+                        docker run -d \\
+                            --name blue-green-deployment-app-${env.TARGET_ENV}-1 \\
+                            --network blue-green-deployment_blue-green-network \\
+                            --network-alias app-${env.TARGET_ENV} \\
+                            -p ${env.TARGET_ENV == 'blue' ? 3001 : 3002}:3000 \\
+                            -e COLOR=${env.TARGET_ENV.toUpperCase()} \\
+                            -e VERSION=${env.VERSION} \\
+                            ${env.IMAGE_TAG}
+
+                        # Verify container is connected to network
+                        sleep 2
+                        if docker network inspect blue-green-deployment_blue-green-network | grep -q "blue-green-deployment-app-${env.TARGET_ENV}-1"; then
+                            echo "✅ Container successfully connected to network"
+                        else
+                            echo "❌ Container not connected to network, retrying..."
+                            docker network connect blue-green-deployment_blue-green-network blue-green-deployment-app-${env.TARGET_ENV}-1
+                        fi
 
                         echo "Deployed ${env.IMAGE_TAG} to ${env.TARGET_ENV} environment"
                     """
@@ -333,10 +351,6 @@ http {
                             echo "Creating blue-green network..."
                             docker network create blue-green-deployment_blue-green-network
                         fi
-
-                        # Ensure app container is connected to the network
-                        echo "Connecting app container to blue-green network..."
-                        docker network connect blue-green-deployment_blue-green-network blue-green-deployment-app-${env.TARGET_ENV}-1 2>/dev/null || true
 
                         # Create nginx container without volume mount
                         echo "Creating Nginx container..."
