@@ -178,8 +178,8 @@ pipeline {
                         # Stop target environment container if running
                         docker-compose stop app-${env.TARGET_ENV} || true
 
-                        # Pull new image
-                        docker pull ${env.IMAGE_TAG}
+                        # Pull new image (optional, use local if not available)
+                        docker pull ${env.IMAGE_TAG} || echo "Using local image - Docker Hub pull failed"
 
                         # Update docker-compose with new image
                         sed -i 's|image: .*|image: ${env.IMAGE_TAG}|' docker-compose.yml
