@@ -99,7 +99,8 @@ pipeline {
 
                         # Wait for container to be ready
                         echo "Waiting for container to start..."
-                        for i in {1..10}; do
+                        i=1
+                        while [ \$i -le 10 ]; do
                             sleep 2
                             if curl -f http://host.docker.internal:3000/health 2>/dev/null; then
                                 echo "✅ Health check passed after \$((i*2)) seconds!"
@@ -116,6 +117,7 @@ pipeline {
                                     echo "⚠️ Health check failed, but continuing deployment"
                                 fi
                             fi
+                            i=\$((i+1))
                         done
                     """
 
