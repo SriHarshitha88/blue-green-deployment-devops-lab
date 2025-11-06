@@ -334,6 +334,10 @@ http {
                             docker network create blue-green-deployment_blue-green-network
                         fi
 
+                        # Ensure app container is connected to the network
+                        echo "Connecting app container to blue-green network..."
+                        docker network connect blue-green-deployment_blue-green-network blue-green-deployment-app-${env.TARGET_ENV}-1 2>/dev/null || true
+
                         # Create nginx container without volume mount
                         echo "Creating Nginx container..."
                         if docker run -d --name nginx \
@@ -346,9 +350,20 @@ http {
                             exit 1
                         fi
 
+                        # Wait for containers to be ready on network
+                        sleep 2
+
                         # Copy configuration into container
                         echo "Copying Nginx configuration..."
                         docker cp nginx-temp.conf nginx:/etc/nginx/nginx.conf
+
+                        # Test connectivity from nginx to app
+                        echo "Testing connectivity to app-${env.TARGET_ENV}..."
+                        if docker exec nginx ping -c 1 app-${env.TARGET_ENV}; then
+                            echo "✅ Network connectivity confirmed"
+                        else
+                            echo "⚠️ Network ping failed, but continuing..."
+                        fi
 
                         # Wait for nginx to start
                         echo "Waiting for Nginx to start..."
@@ -381,6 +396,16 @@ http {
                     sh """
                         echo "Validating traffic routing to ${env.TARGET_ENV} environment..."
 
+                        # First, verify app container is healthy using IPv4
+                        echo "Checking app container health..."
+                        if docker exec blue-green-deployment-app-${env.TARGET_ENV}-1 node -e "require('http').get('http://127.0.0.1:3000/health', (res) => { console.log('Status:', res.statusCode); process.exit(res.statusCode === 200 ? 0 : 1) })"; then
+                            echo "✅ App container is healthy"
+                        else
+                            echo "❌ App container is not responding"
+                            docker logs blue-green-deployment-app-${env.TARGET_ENV}-1 2>&1 | tail -10
+                            exit 1
+                        fi
+
                         # Test Nginx proxy on port 80
                         echo "Testing Nginx proxy at http://localhost/health..."
                         if RESPONSE=\$(curl -s http://localhost/health 2>/dev/null); then
@@ -396,6 +421,16 @@ http {
                             else
                                 echo "⚠️ Environment validation check failed, but health check passed"
                                 echo "Expected environment: ${env.TARGET_ENV.toUpperCase()}"
+
+                                # Test from nginx to app directly
+                                echo "Testing connection from Nginx to app..."
+                                if docker exec nginx wget -qO- http://app-${env.TARGET_ENV}:3000/health 2>/dev/null || docker exec nginx curl -sf http://app-${env.TARGET_ENV}:3000/health 2>/dev/null; then
+                                    echo "✅ Nginx can reach app container directly"
+                                else
+                                    echo "❌ Nginx cannot reach app container"
+                                    docker network inspect blue-green-deployment_blue-green-network | grep -A 5 -B 5 Containers
+                                    exit 1
+                                fi
                             fi
                         else
                             echo "❌ Nginx proxy not responding"
@@ -403,16 +438,13 @@ http {
                             docker ps | grep nginx || echo "Nginx container not found"
                             docker ps | grep app-${env.TARGET_ENV} || echo "App container not found"
 
-                            # Check if app container is healthy directly using node
-                            echo "Testing direct connection to app container..."
-                            if docker exec blue-green-deployment-app-${env.TARGET_ENV}-1 node -e "require('http').get('http://localhost:3000/health', (res) => { console.log('Status:', res.statusCode); process.exit(res.statusCode === 200 ? 0 : 1) })"; then
-                                echo "✅ App container is healthy"
-                                echo "Issue may be with Nginx configuration"
-                                docker logs nginx 2>&1 | tail -10 || echo "No Nginx logs available"
-                            else
-                                echo "❌ App container is not responding"
-                                exit 1
-                            fi
+                            echo "Nginx logs:"
+                            docker logs nginx 2>&1 | tail -20 || echo "No Nginx logs available"
+
+                            echo "Network inspection:"
+                            docker network inspect blue-green-deployment_blue-green-network | grep -E "(Name|IPAddress)" || echo "Network inspection failed"
+
+                            exit 1
                         fi
                     """
                 }
