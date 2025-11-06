@@ -210,7 +210,7 @@ events {
 
 http {
     upstream app_servers {
-        server app-${env.TARGET_ENV}:3000 max_fails=3 fail_timeout=30s;
+        server app-" + env.TARGET_ENV + ":3000 max_fails=3 fail_timeout=30s;
         keepalive 32;
     }
 
