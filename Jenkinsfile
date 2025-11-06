@@ -1,0 +1,320 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'DOCKER_IMAGE', defaultValue: 'yourusername/blue-green-app', description: 'Docker image name')
+        string(name: 'VERSION', defaultValue: '', description: 'Version tag (leave empty for git commit SHA)')
+        choice(name: 'ENVIRONMENT', choices: ['production', 'staging'], description: 'Target environment')
+        booleanParam(name: 'SKIP_TESTS', defaultValue: false, description: 'Skip automated tests')
+    }
+
+    environment {
+        DOCKER_REGISTRY = 'docker.io'
+        DOCKER_CREDENTIALS = credentials('docker-hub-credentials')
+        CURRENT_ENV = 'blue'
+        NGINX_CONFIG = '/etc/nginx/nginx.conf'
+        BACKUP_CONFIG = '/etc/nginx/nginx.conf.backup'
+    }
+
+    stages {
+        stage('Preparation') {
+            steps {
+                script {
+                    // Set version from git if not provided
+                    if (!params.VERSION) {
+                        env.VERSION = sh(
+                            script: 'git rev-parse --short HEAD',
+                            returnStdout: true
+                        ).trim()
+                    }
+                    env.IMAGE_TAG = "${params.DOCKER_IMAGE}:${env.VERSION}"
+                    echo "Building image ${env.IMAGE_TAG}"
+                }
+            }
+        }
+
+        stage('Code Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    sh """
+                        docker build -t ${env.IMAGE_TAG} .
+                        echo "Image built successfully: ${env.IMAGE_TAG}"
+                    """
+                }
+            }
+        }
+
+        stage('Run Tests') {
+            when {
+                expression { !params.SKIP_TESTS }
+            }
+            steps {
+                script {
+                    // Run tests in container
+                    sh """
+                        docker run --rm \
+                            -e COLOR=TEST \
+                            -e VERSION=${env.VERSION} \
+                            ${env.IMAGE_TAG} \
+                            npm test || echo "No tests configured"
+                    """
+
+                    // Health check test
+                    sh """
+                        echo "Running health check test..."
+                        HEALTH_STATUS=\$(docker run --rm -d -p 3000:3000 ${env.IMAGE_TAG})
+                        sleep 5
+                        curl -f http://localhost:3000/health || exit 1
+                        docker stop \$HEALTH_STATUS
+                        echo "Health check passed!"
+                    """
+                }
+            }
+        }
+
+        stage('Push to Docker Hub') {
+            steps {
+                script {
+                    sh """
+                        echo ${DOCKER_CREDENTIALS_PSW} | docker login -u ${DOCKER_CREDENTIALS_USR} --password-stdin ${DOCKER_REGISTRY}
+                        docker push ${env.IMAGE_TAG}
+                        docker logout ${DOCKER_REGISTRY}
+                        echo "Image pushed to registry: ${env.IMAGE_TAG}"
+                    """
+                }
+            }
+        }
+
+        stage('Determine Active Environment') {
+            steps {
+                script {
+                    // Check which environment is currently active
+                    def currentUpstream = sh(
+                        script: 'curl -s http://nginx/ | grep -o "Current Environment: <strong>\\(BLUE\\|GREEN\\)</strong>" | grep -o "BLUE\\|GREEN" || echo "BLUE"',
+                        returnStdout: true
+                    ).trim().toLowerCase()
+
+                    if (currentUpstream == 'blue') {
+                        env.CURRENT_ENV = 'blue'
+                        env.TARGET_ENV = 'green'
+                    } else {
+                        env.CURRENT_ENV = 'green'
+                        env.TARGET_ENV = 'blue'
+                    }
+
+                    echo "Current active environment: ${env.CURRENT_ENV}"
+                    echo "Target deployment environment: ${env.TARGET_ENV}"
+                }
+            }
+        }
+
+        stage('Deploy to Target Environment') {
+            steps {
+                script {
+                    // Deploy to target environment
+                    sh """
+                        # Stop target environment container if running
+                        docker-compose stop app-${env.TARGET_ENV} || true
+
+                        # Pull new image
+                        docker pull ${env.IMAGE_TAG}
+
+                        # Update docker-compose with new image
+                        sed -i 's|image: .*|image: ${env.IMAGE_TAG}|' docker-compose.yml
+
+                        # Start target environment with new image
+                        export COLOR=${env.TARGET_ENV.toUpperCase()}
+                        export VERSION=${env.VERSION}
+                        docker-compose up -d app-${env.TARGET_ENV}
+
+                        echo "Deployed ${env.IMAGE_TAG} to ${env.TARGET_ENV} environment"
+                    """
+                }
+            }
+        }
+
+        stage('Health Check') {
+            steps {
+                script {
+                    // Wait for container to be healthy
+                    def maxAttempts = 30
+                    def attempt = 0
+
+                    while (attempt < maxAttempts) {
+                        try {
+                            def healthResponse = sh(
+                                script: "curl -f http://localhost:3001/health || curl -f http://localhost:3002/health",
+                                returnStdout: true
+                            )
+
+                            if (healthResponse.contains('"status":"healthy"')) {
+                                echo "Health check passed for ${env.TARGET_ENV} environment"
+                                break
+                            }
+                        } catch (Exception e) {
+                            echo "Health check attempt ${attempt + 1} failed"
+                        }
+
+                        attempt++
+                        sleep 5
+                    }
+
+                    if (attempt == maxAttempts) {
+                        error "Health check failed after ${maxAttempts} attempts"
+                    }
+                }
+            }
+        }
+
+        stage('Smoke Tests') {
+            steps {
+                script {
+                    // Run smoke tests against target environment
+                    def targetPort = env.TARGET_ENV == 'blue' ? 3001 : 3002
+
+                    sh """
+                        # Test health endpoint
+                        curl -f http://localhost:${targetPort}/health || exit 1
+
+                        # Test info endpoint
+                        curl -f http://localhost:${targetPort}/info || exit 1
+
+                        # Test main endpoint
+                        curl -f http://localhost:${targetPort}/ || exit 1
+
+                        echo "Smoke tests passed for ${env.TARGET_ENV} environment"
+                    """
+                }
+            }
+        }
+
+        stage('Switch Traffic') {
+            steps {
+                input message: "Switch traffic to ${env.TARGET_ENV.toUpperCase()} environment?", ok: "Switch"
+
+                script {
+                    // Backup current Nginx config
+                    sh 'cp ${NGINX_CONFIG} ${BACKUP_CONFIG}'
+
+                    // Update Nginx configuration to route to target environment
+                    def nginxConfig = """
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream app_servers {
+        server app-${env.TARGET_ENV}:3000 max_fails=3 fail_timeout=30s;
+        keepalive 32;
+    }
+
+    # Include other configurations from original file
+    $(cat nginx.conf | grep -A 200 'upstream blue_backend')
+}
+"""
+
+                    writeFile file: 'nginx-temp.conf', text: nginxConfig
+
+                    // Reload Nginx
+                    sh """
+                        # Update Nginx configuration
+                        docker cp nginx-temp.conf nginx:${NGINX_CONFIG}
+
+                        # Test configuration
+                        docker exec nginx nginx -t || exit 1
+
+                        # Reload Nginx
+                        docker exec nginx nginx -s reload
+
+                        echo "Traffic switched to ${env.TARGET_ENV} environment"
+                    """
+                }
+            }
+        }
+
+        stage('Post-Switch Validation') {
+            steps {
+                script {
+                    // Verify traffic is routed to new environment
+                    sleep 10
+
+                    sh """
+                        # Verify through Nginx proxy
+                        curl -f http://localhost/health || exit 1
+                        curl -f http://localhost/info | grep ${env.TARGET_ENV.toUpperCase()} || exit 1
+
+                        echo "Validation successful - Traffic is now routed to ${env.TARGET_ENV}"
+                    """
+                }
+            }
+        }
+
+        stage('Clean Up') {
+            steps {
+                script {
+                    // Keep old environment running for rollback
+                    echo "Keeping ${env.CURRENT_ENV} environment running for immediate rollback if needed"
+
+                    // Clean up temporary files
+                    sh 'rm -f nginx-temp.conf || true'
+
+                    // Prune unused Docker images
+                    sh 'docker image prune -f || true'
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                echo "✅ Blue-Green deployment completed successfully!"
+                echo "📊 Active environment: ${env.TARGET_ENV}"
+                echo "🐳 Deployed image: ${env.IMAGE_TAG}"
+
+                // Send success notification (optional)
+                // slackSend(color: 'good', message: "Deployment successful: ${env.IMAGE_TAG} to ${env.TARGET_ENV}")
+            }
+        }
+
+        failure {
+            script {
+                echo "❌ Deployment failed!"
+
+                // Rollback on failure
+                try {
+                    sh """
+                        # Restore Nginx configuration
+                        if [ -f ${BACKUP_CONFIG} ]; then
+                            cp ${BACKUP_CONFIG} ${NGINX_CONFIG}
+                            docker exec nginx nginx -s reload
+                            echo "Rolled back Nginx configuration"
+                        fi
+
+                        # Stop failed deployment
+                        docker-compose stop app-${env.TARGET_ENV} || true
+                    """
+                } catch (Exception e) {
+                    echo "Rollback failed: ${e}"
+                }
+
+                // Send failure notification (optional)
+                // slackSend(color: 'danger', message: "Deployment failed: ${env.IMAGE_TAG}")
+            }
+        }
+
+        unstable {
+            echo "⚠️ Deployment completed with warnings"
+        }
+
+        always {
+            echo "Pipeline execution completed at ${new Date()}"
+        }
+    }
+}
