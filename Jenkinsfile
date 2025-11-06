@@ -95,7 +95,7 @@ pipeline {
 
                     // Start container in background
                     sh """
-                        HEALTH_STATUS=\$(docker run --rm -d -p 3000:3000 ${env.IMAGE_TAG})
+                        HEALTH_STATUS=\$(docker run -d -p 3000:3000 ${env.IMAGE_TAG})
                         echo "Container started with ID: \$HEALTH_STATUS"
 
                         # Wait for container to be ready
@@ -103,7 +103,8 @@ pipeline {
                         i=1
                         while [ \$i -le 10 ]; do
                             sleep 2
-                            if curl -f http://host.docker.internal:3000/health 2>/dev/null || curl -f http://172.17.0.1:3000/health 2>/dev/null; then
+                            # Use host.docker.internal to connect from Jenkins container to host
+                            if curl -f http://host.docker.internal:3000/health 2>/dev/null; then
                                 echo "✅ Health check passed after \$((i*2)) seconds!"
                                 docker stop \$HEALTH_STATUS
                                 echo "Container stopped successfully"
@@ -151,7 +152,7 @@ pipeline {
                 script {
                     // Check which environment is currently active
                     def currentUpstream = sh(
-                        script: 'curl -s http://host.docker.internal:80/ 2>/dev/null | grep -o "Current Environment: <strong>\\(BLUE\\|GREEN\\)</strong>" | grep -o "BLUE\\|GREEN" || curl -s http://172.17.0.1:80/ 2>/dev/null | grep -o "Current Environment: <strong>\\(BLUE\\|GREEN\\)</strong>" | grep -o "BLUE\\|GREEN" || echo "BLUE"',
+                        script: 'curl -s http://host.docker.internal:80/ 2>/dev/null | grep -o "Current Environment: <strong>\\(BLUE\\|GREEN\\)</strong>" | grep -o "BLUE\\|GREEN" || echo "BLUE"',
                         returnStdout: true
                     ).trim().toLowerCase()
 
@@ -215,7 +216,7 @@ pipeline {
                         try {
                             // Add verbose curl output
                             def healthResponse = sh(
-                                script: "curl -v http://host.docker.internal:${targetPort}/health 2>&1 || curl -v http://172.17.0.1:${targetPort}/health 2>&1 || echo 'Connection failed'",
+                                script: "curl -v http://host.docker.internal:${targetPort}/health 2>&1 || echo 'Connection failed'",
                                 returnStdout: true
                             ).trim()
 
@@ -266,13 +267,13 @@ pipeline {
 
                     sh """
                         # Test health endpoint
-                        curl -f http://host.docker.internal:${targetPort}/health || curl -f http://172.17.0.1:${targetPort}/health || exit 1
+                        curl -f http://host.docker.internal:${targetPort}/health || exit 1
 
                         # Test info endpoint
-                        curl -f http://host.docker.internal:${targetPort}/info || curl -f http://172.17.0.1:${targetPort}/info || exit 1
+                        curl -f http://host.docker.internal:${targetPort}/info || exit 1
 
                         # Test main endpoint
-                        curl -f http://host.docker.internal:${targetPort}/ || curl -f http://172.17.0.1:${targetPort}/ || exit 1
+                        curl -f http://host.docker.internal:${targetPort}/ || exit 1
 
                         echo "Smoke tests passed for ${env.TARGET_ENV} environment"
                     """
@@ -327,59 +328,45 @@ http {
                         # Remove existing nginx container if it exists
                         docker rm -f nginx 2>/dev/null || true
 
-                        # Create a directory for nginx config
-                        mkdir -p ${WORKSPACE}/nginx-config
-
-                        # Copy config to the nginx config directory
-                        cp nginx-temp.conf ${WORKSPACE}/nginx-config/nginx.conf
-
-                        # Verify config file was created
-                        echo "Nginx configuration file:"
-                        cat ${WORKSPACE}/nginx-config/nginx.conf
-
                         # Check if network exists
                         if ! docker network ls | grep -q "blue-green-deployment_blue-green-network"; then
                             echo "Creating blue-green network..."
                             docker network create blue-green-deployment_blue-green-network
                         fi
 
-                        # Create new nginx container with proper networking
-                        echo "Creating Nginx container with custom configuration..."
+                        # Create nginx container without volume mount
+                        echo "Creating Nginx container..."
                         if docker run -d --name nginx \
                             -p 80:80 \
-                            -v ${WORKSPACE}/nginx-config:/etc/nginx:ro \
                             --network blue-green-deployment_blue-green-network \
                             nginx:alpine; then
-                            echo "Nginx container created successfully"
+                            echo "✅ Nginx container created successfully"
                         else
-                            echo "Failed to create Nginx container"
+                            echo "❌ Failed to create Nginx container"
                             exit 1
                         fi
+
+                        # Copy configuration into container
+                        echo "Copying Nginx configuration..."
+                        docker cp nginx-temp.conf nginx:/etc/nginx/nginx.conf
 
                         # Wait for nginx to start
                         echo "Waiting for Nginx to start..."
                         sleep 3
 
-                        # Check if nginx is running
-                        if docker ps | grep -q 'nginx'; then
-                            echo "✅ Nginx container is running"
-                            echo "Nginx container details:"
-                            docker ps | grep nginx
-
-                            # Test nginx config
-                            echo "Testing Nginx configuration..."
-                            docker exec nginx nginx -t || echo "Nginx config test failed"
-
-                            # Reload nginx
-                            docker exec nginx nginx -s reload || echo "Reload not needed"
+                        # Test and reload nginx configuration
+                        echo "Testing Nginx configuration..."
+                        if docker exec nginx nginx -t; then
+                            echo "✅ Nginx configuration is valid"
+                            docker exec nginx nginx -s reload
+                            echo "✅ Nginx reloaded successfully"
                         else
-                            echo "❌ Failed to start Nginx container"
-                            echo "Nginx container logs:"
-                            docker logs nginx 2>&1 || echo "No logs available"
+                            echo "❌ Invalid Nginx configuration"
+                            docker logs nginx 2>&1 | tail -20
                             exit 1
                         fi
 
-                        echo "Traffic switched to ${env.TARGET_ENV} environment"
+                        echo "✅ Traffic switched to ${env.TARGET_ENV} environment"
                     """
                 }
             }
