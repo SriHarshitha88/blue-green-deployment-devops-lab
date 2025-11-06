@@ -22,8 +22,18 @@ pipeline {
                 script {
                     sh '''
                         echo "Cleaning up any containers from previous runs..."
+                        # Stop docker-compose containers if running
+                        docker-compose down -v 2>/dev/null || true
+
+                        # Stop any containers using ports 3000, 3001, 3002
+                        docker ps -q --filter "publish=3000" | xargs -r docker stop
+                        docker ps -q --filter "publish=3001" | xargs -r docker stop
+                        docker ps -q --filter "publish=3002" | xargs -r docker stop
+
                         # Stop any containers running our app image
                         docker ps -q --filter "ancestor=harshitha888/blue-green-app" | xargs -r docker stop
+                        docker ps -q --filter "name=blue-green-deployment" | xargs -r docker stop
+
                         # Remove any stopped containers
                         docker container prune -f
                         # Remove any dangling images
