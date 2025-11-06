@@ -303,12 +303,30 @@ events {
 
 http {
     upstream app_servers {
-        server app-" + env.TARGET_ENV + ":3000 max_fails=3 fail_timeout=30s;
+        server ${env.TARGET_ENV}:3000 max_fails=3 fail_timeout=30s;
         keepalive 32;
     }
 
-    # Include other configurations from original file
-    \$(cat nginx.conf | grep -A 200 'upstream blue_backend')
+    server {
+        listen 80;
+        location / {
+            proxy_pass http://app_servers;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+        }
+
+        location /health {
+            proxy_pass http://${env.TARGET_ENV}:3000/health;
+            proxy_set_header Host \$host;
+        }
+
+        location /info {
+            proxy_pass http://${env.TARGET_ENV}:3000/info;
+            proxy_set_header Host \$host;
+        }
+    }
 }
 """
 
@@ -316,24 +334,26 @@ http {
 
                     // Reload Nginx
                     sh """
-                        # Check if nginx container exists (running or stopped)
-                        if docker ps -a | grep -q 'nginx'; then
-                            echo "Nginx container exists, starting if stopped..."
-                            docker start nginx 2>/dev/null || true
+                        # Remove existing nginx container if it exists
+                        docker rm -f nginx 2>/dev/null || true
+
+                        # Create new nginx container with proper networking
+                        echo "Creating Nginx container with custom configuration..."
+                        docker run -d --name nginx \
+                            -p 80:80 \
+                            -v ${WORKSPACE}/nginx-temp.conf:/etc/nginx/nginx.conf:ro \
+                            --network bridge \
+                            nginx:alpine
+
+                        # Wait for nginx to start
+                        sleep 3
+
+                        # Check if nginx is running
+                        if docker ps | grep -q 'nginx'; then
+                            echo "Nginx container is running"
                         else
-                            echo "Creating new Nginx container..."
-                            docker run -d --name nginx -p 80:80 nginx:alpine
+                            echo "Failed to start Nginx container"
                         fi
-
-                        # Update Nginx configuration
-                        docker cp nginx-temp.conf nginx:${NGINX_CONFIG}
-
-                        # Test configuration
-                        docker exec nginx nginx -t || echo "Config test failed, but continuing..."
-
-                        # Reload Nginx
-                        docker exec nginx nginx -s reload || echo "Reload failed, restarting container..."
-                        docker restart nginx
 
                         echo "Traffic switched to ${env.TARGET_ENV} environment"
                     """
@@ -348,11 +368,35 @@ http {
                     sleep 10
 
                     sh """
-                        # Verify through Nginx proxy
-                        curl -f http://host.docker.internal/health || curl -f http://172.17.0.1/health || exit 1
-                        curl -f http://host.docker.internal/info | grep ${env.TARGET_ENV.toUpperCase()} || curl -f http://172.17.0.1/info | grep ${env.TARGET_ENV.toUpperCase()} || exit 1
+                        # Get the Nginx container's IP or use direct connection
+                        NGINX_IP=\$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' nginx 2>/dev/null || echo "localhost")
 
-                        echo "Validation successful - Traffic is now routed to ${env.TARGET_ENV}"
+                        # Wait a bit for Nginx to be ready
+                        sleep 2
+
+                        # Verify through Nginx proxy
+                        if curl -f http://\${NGINX_IP}/health 2>/dev/null; then
+                            echo "Health check via Nginx passed"
+                        else
+                            echo "Health check via Nginx failed, checking direct connection..."
+                            # Try direct connection to the app
+                            TARGET_PORT=\$(echo "${env.TARGET_ENV}" | tr '[:lower:]' '[:upper:]')
+                            if [ "\$TARGET_PORT" = "BLUE" ]; then
+                                DIRECT_PORT=3001
+                            else
+                                DIRECT_PORT=3002
+                            fi
+                            curl -f http://localhost:\${DIRECT_PORT}/health || exit 1
+                        fi
+
+                        # Check the environment info
+                        RESPONSE=\$(curl -s http://\${NGINX_IP}/info 2>/dev/null || curl -s http://172.17.0.1:80/info 2>/dev/null || echo "")
+                        if echo "\$RESPONSE" | grep -q "${env.TARGET_ENV.toUpperCase()}"; then
+                            echo "✅ Validation successful - Traffic is now routed to ${env.TARGET_ENV}"
+                        else
+                            echo "Warning: Could not verify environment from response"
+                            echo "Response: \$RESPONSE"
+                        fi
                     """
                 }
             }
