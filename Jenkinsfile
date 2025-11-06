@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'DOCKER_IMAGE', defaultValue: 'sriharshitha88/blue-green-app', description: 'Docker image name')
+        string(name: 'DOCKER_IMAGE', defaultValue: 'harshitha888/blue-green-app', description: 'Docker image name')
         string(name: 'VERSION', defaultValue: '', description: 'Version tag (leave empty for git commit SHA)')
         choice(name: 'ENVIRONMENT', choices: ['production', 'staging'], description: 'Target environment')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false, description: 'Skip automated tests')
@@ -23,7 +23,7 @@ pipeline {
                     sh '''
                         echo "Cleaning up any containers from previous runs..."
                         # Stop any containers running our app image
-                        docker ps -q --filter "ancestor=sriharshitha88/blue-green-app" | xargs -r docker stop
+                        docker ps -q --filter "ancestor=harshitha888/blue-green-app" | xargs -r docker stop
                         # Remove any stopped containers
                         docker container prune -f
                         # Remove any dangling images
