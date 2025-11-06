@@ -303,7 +303,7 @@ events {
 
 http {
     upstream app_servers {
-        server ${env.TARGET_ENV}:3000 max_fails=3 fail_timeout=30s;
+        server app-${env.TARGET_ENV}:3000 max_fails=3 fail_timeout=30s;
         keepalive 32;
     }
 
@@ -318,12 +318,12 @@ http {
         }
 
         location /health {
-            proxy_pass http://${env.TARGET_ENV}:3000/health;
+            proxy_pass http://app_servers/health;
             proxy_set_header Host \$host;
         }
 
         location /info {
-            proxy_pass http://${env.TARGET_ENV}:3000/info;
+            proxy_pass http://app_servers/info;
             proxy_set_header Host \$host;
         }
     }
@@ -348,7 +348,7 @@ http {
                         docker run -d --name nginx \
                             -p 80:80 \
                             -v ${WORKSPACE}/nginx-config:/etc/nginx:ro \
-                            --network bridge \
+                            --network blue-green-deployment_blue-green-network \
                             nginx:alpine
 
                         # Wait for nginx to start
