@@ -17,6 +17,23 @@ pipeline {
     }
 
     stages {
+        stage('Cleanup Previous Runs') {
+            steps {
+                script {
+                    sh '''
+                        echo "Cleaning up any containers from previous runs..."
+                        # Stop any containers running our app image
+                        docker ps -q --filter "ancestor=sriharshitha88/blue-green-app" | xargs -r docker stop
+                        # Remove any stopped containers
+                        docker container prune -f
+                        # Remove any dangling images
+                        docker image prune -f
+                        echo "Cleanup completed"
+                    '''
+                }
+            }
+        }
+
         stage('Preparation') {
             steps {
                 script {
@@ -69,6 +86,13 @@ pipeline {
                     sh """
                         echo "Running health check test..."
                         echo "Starting container with image: ${env.IMAGE_TAG}"
+
+                        # First, stop any existing containers on port 3000
+                        echo "Checking for existing containers on port 3000..."
+                        docker ps -q --filter "publish=3000" | xargs -r docker stop
+
+                        # Wait a moment for ports to be released
+                        sleep 2
 
                         # Start container in background
                         HEALTH_STATUS=\$(docker run --rm -d -p 3000:3000 ${env.IMAGE_TAG})
