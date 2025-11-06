@@ -103,7 +103,7 @@ pipeline {
                         i=1
                         while [ \$i -le 10 ]; do
                             sleep 2
-                            if curl -f http://host.docker.internal:3000/health 2>/dev/null; then
+                            if curl -f http://host.docker.internal:3000/health 2>/dev/null || curl -f http://172.17.0.1:3000/health 2>/dev/null; then
                                 echo "✅ Health check passed after \$((i*2)) seconds!"
                                 docker stop \$HEALTH_STATUS
                                 echo "Container stopped successfully"
@@ -151,7 +151,7 @@ pipeline {
                 script {
                     // Check which environment is currently active
                     def currentUpstream = sh(
-                        script: 'curl -s http://host.docker.internal:80/ 2>/dev/null | grep -o "Current Environment: <strong>\\(BLUE\\|GREEN\\)</strong>" | grep -o "BLUE\\|GREEN" || echo "BLUE"',
+                        script: 'curl -s http://host.docker.internal:80/ 2>/dev/null | grep -o "Current Environment: <strong>\\(BLUE\\|GREEN\\)</strong>" | grep -o "BLUE\\|GREEN" || curl -s http://172.17.0.1:80/ 2>/dev/null | grep -o "Current Environment: <strong>\\(BLUE\\|GREEN\\)</strong>" | grep -o "BLUE\\|GREEN" || echo "BLUE"',
                         returnStdout: true
                     ).trim().toLowerCase()
 
@@ -215,7 +215,7 @@ pipeline {
                         try {
                             // Add verbose curl output
                             def healthResponse = sh(
-                                script: "curl -v http://host.docker.internal:${targetPort}/health 2>&1 || echo 'Connection failed'",
+                                script: "curl -v http://host.docker.internal:${targetPort}/health 2>&1 || curl -v http://172.17.0.1:${targetPort}/health 2>&1 || echo 'Connection failed'",
                                 returnStdout: true
                             ).trim()
 
@@ -266,13 +266,13 @@ pipeline {
 
                     sh """
                         # Test health endpoint
-                        curl -f http://host.docker.internal:${targetPort}/health || exit 1
+                        curl -f http://host.docker.internal:${targetPort}/health || curl -f http://172.17.0.1:${targetPort}/health || exit 1
 
                         # Test info endpoint
-                        curl -f http://host.docker.internal:${targetPort}/info || exit 1
+                        curl -f http://host.docker.internal:${targetPort}/info || curl -f http://172.17.0.1:${targetPort}/info || exit 1
 
                         # Test main endpoint
-                        curl -f http://host.docker.internal:${targetPort}/ || exit 1
+                        curl -f http://host.docker.internal:${targetPort}/ || curl -f http://172.17.0.1:${targetPort}/ || exit 1
 
                         echo "Smoke tests passed for ${env.TARGET_ENV} environment"
                     """
@@ -349,8 +349,8 @@ http {
 
                     sh """
                         # Verify through Nginx proxy
-                        curl -f http://host.docker.internal/health || exit 1
-                        curl -f http://host.docker.internal/info | grep ${env.TARGET_ENV.toUpperCase()} || exit 1
+                        curl -f http://host.docker.internal/health || curl -f http://172.17.0.1/health || exit 1
+                        curl -f http://host.docker.internal/info | grep ${env.TARGET_ENV.toUpperCase()} || curl -f http://172.17.0.1/info | grep ${env.TARGET_ENV.toUpperCase()} || exit 1
 
                         echo "Validation successful - Traffic is now routed to ${env.TARGET_ENV}"
                     """
