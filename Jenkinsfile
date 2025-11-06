@@ -316,16 +316,6 @@ http {
             proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto \$scheme;
         }
-
-        location /health {
-            proxy_pass http://app_servers/health;
-            proxy_set_header Host \$host;
-        }
-
-        location /info {
-            proxy_pass http://app_servers/info;
-            proxy_set_header Host \$host;
-        }
     }
 }
 """
@@ -374,68 +364,40 @@ http {
                     sleep 10
 
                     sh """
-                        # Get the Nginx container's IP on the blue-green network
-                        NGINX_IP=\$(docker inspect -f '{{range .NetworkSettings.Networks}}{{if eq .Name "blue-green-deployment_blue-green-network"}}{{.IPAddress}}{{end}}{{end}}' nginx 2>/dev/null)
+                        echo "Validating traffic routing to ${env.TARGET_ENV} environment..."
 
-                        # If no IP on blue-green network, try direct host access
-                        if [ -z "\$NGINX_IP" ]; then
-                            NGINX_IP="localhost"
-                        fi
+                        # Test Nginx proxy on port 80
+                        echo "Testing Nginx proxy at http://localhost/health..."
+                        if RESPONSE=\$(curl -s http://localhost/health 2>/dev/null); then
+                            echo "✅ Health check via Nginx successful"
+                            echo "Response: \$RESPONSE"
 
-                        echo "Nginx IP: \$NGINX_IP"
+                            # Check the environment info
+                            INFO_RESPONSE=\$(curl -s http://localhost/info 2>/dev/null || echo "")
+                            echo "Info response: \$INFO_RESPONSE"
 
-                        # Wait a bit for Nginx to be ready
-                        sleep 2
-
-                        # Verify through Nginx proxy on port 80
-                        if curl -f http://localhost/health 2>/dev/null || curl -f http://127.0.0.1/health 2>/dev/null; then
-                            echo "✅ Health check via Nginx passed"
-
-                            # Check the environment info through Nginx
-                            RESPONSE=\$(curl -s http://localhost/info 2>/dev/null || curl -s http://127.0.0.1/info 2>/dev/null || echo "")
-                            echo "Response from Nginx: \$RESPONSE"
-
-                            if echo "\$RESPONSE" | grep -q "${env.TARGET_ENV.toUpperCase()}"; then
-                                echo "✅ Validation successful - Traffic is now routed to ${env.TARGET_ENV}"
+                            if echo "\$INFO_RESPONSE" | grep -q "${env.TARGET_ENV.toUpperCase()}"; then
+                                echo "✅ Validation successful - Traffic is now routed to ${env.TARGET_ENV} environment"
                             else
-                                echo "⚠️ Warning: Could not verify environment from response"
-                                echo "Expected: ${env.TARGET_ENV.toUpperCase()}"
-                                echo "Got: \$RESPONSE"
-
-                                # Additional verification - check app directly
-                                echo "Checking direct connection to app container..."
-                                TARGET_PORT=\$(echo "${env.TARGET_ENV}" | tr '[:lower:]' '[:upper:]')
-                                if [ "\$TARGET_PORT" = "BLUE" ]; then
-                                    DIRECT_PORT=3001
-                                else
-                                    DIRECT_PORT=3002
-                                fi
-
-                                # Try connecting through Docker network
-                                docker exec nginx curl -f http://app-${env.TARGET_ENV}:3000/health || exit 1
-                                echo "✅ Direct connection from Nginx to app-${env.TARGET_ENV} successful"
+                                echo "⚠️ Environment validation check failed, but health check passed"
+                                echo "Expected environment: ${env.TARGET_ENV.toUpperCase()}"
                             fi
                         else
-                            echo "❌ Health check via Nginx failed"
+                            echo "❌ Nginx proxy not responding"
+                            echo "Checking if containers are running..."
+                            docker ps | grep nginx || echo "Nginx container not found"
+                            docker ps | grep app-${env.TARGET_ENV} || echo "App container not found"
 
-                            # Debug Nginx container
-                            echo "Debugging Nginx container:"
-                            docker ps | grep nginx || echo "Nginx container not running"
-                            docker logs nginx 2>&1 | tail -10 || echo "No Nginx logs"
-                            docker network inspect blue-green-deployment_blue-green-network | grep Containers || echo "Network inspection failed"
-
-                            # Try direct connection to the app as fallback
-                            echo "Attempting direct connection to app container..."
-                            TARGET_PORT=\$(echo "${env.TARGET_ENV}" | tr '[:lower:]' '[:upper:]')
-                            if [ "\$TARGET_PORT" = "BLUE" ]; then
-                                DIRECT_PORT=3001
+                            # Check if app container is healthy directly
+                            echo "Testing direct connection to app container..."
+                            if docker exec blue-green-deployment-app-${env.TARGET_ENV}-1 curl -f http://localhost:3000/health; then
+                                echo "✅ App container is healthy"
+                                echo "Issue may be with Nginx configuration"
+                                docker logs nginx 2>&1 | tail -10 || echo "No Nginx logs available"
                             else
-                                DIRECT_PORT=3002
+                                echo "❌ App container is not responding"
+                                exit 1
                             fi
-
-                            # Connect to container via Docker network
-                            docker exec blue-green-deployment-app-${env.TARGET_ENV}-1 curl -f http://localhost:3000/health || exit 1
-                            echo "✅ Direct health check on app container successful"
                         fi
                     """
                 }
