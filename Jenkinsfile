@@ -333,22 +333,50 @@ http {
                         # Copy config to the nginx config directory
                         cp nginx-temp.conf ${WORKSPACE}/nginx-config/nginx.conf
 
+                        # Verify config file was created
+                        echo "Nginx configuration file:"
+                        cat ${WORKSPACE}/nginx-config/nginx.conf
+
+                        # Check if network exists
+                        if ! docker network ls | grep -q "blue-green-deployment_blue-green-network"; then
+                            echo "Creating blue-green network..."
+                            docker network create blue-green-deployment_blue-green-network
+                        fi
+
                         # Create new nginx container with proper networking
                         echo "Creating Nginx container with custom configuration..."
-                        docker run -d --name nginx \
+                        if docker run -d --name nginx \
                             -p 80:80 \
                             -v ${WORKSPACE}/nginx-config:/etc/nginx:ro \
                             --network blue-green-deployment_blue-green-network \
-                            nginx:alpine
+                            nginx:alpine; then
+                            echo "Nginx container created successfully"
+                        else
+                            echo "Failed to create Nginx container"
+                            exit 1
+                        fi
 
                         # Wait for nginx to start
+                        echo "Waiting for Nginx to start..."
                         sleep 3
 
                         # Check if nginx is running
                         if docker ps | grep -q 'nginx'; then
-                            echo "Nginx container is running"
+                            echo "✅ Nginx container is running"
+                            echo "Nginx container details:"
+                            docker ps | grep nginx
+
+                            # Test nginx config
+                            echo "Testing Nginx configuration..."
+                            docker exec nginx nginx -t || echo "Nginx config test failed"
+
+                            # Reload nginx
+                            docker exec nginx nginx -s reload || echo "Reload not needed"
                         else
-                            echo "Failed to start Nginx container"
+                            echo "❌ Failed to start Nginx container"
+                            echo "Nginx container logs:"
+                            docker logs nginx 2>&1 || echo "No logs available"
+                            exit 1
                         fi
 
                         echo "Traffic switched to ${env.TARGET_ENV} environment"
@@ -388,9 +416,9 @@ http {
                             docker ps | grep nginx || echo "Nginx container not found"
                             docker ps | grep app-${env.TARGET_ENV} || echo "App container not found"
 
-                            # Check if app container is healthy directly
+                            # Check if app container is healthy directly using node
                             echo "Testing direct connection to app container..."
-                            if docker exec blue-green-deployment-app-${env.TARGET_ENV}-1 curl -f http://localhost:3000/health; then
+                            if docker exec blue-green-deployment-app-${env.TARGET_ENV}-1 node -e "require('http').get('http://localhost:3000/health', (res) => { console.log('Status:', res.statusCode); process.exit(res.statusCode === 200 ? 0 : 1) })"; then
                                 echo "✅ App container is healthy"
                                 echo "Issue may be with Nginx configuration"
                                 docker logs nginx 2>&1 | tail -10 || echo "No Nginx logs available"
