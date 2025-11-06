@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'DOCKER_IMAGE', defaultValue: 'yourusername/blue-green-app', description: 'Docker image name')
+        string(name: 'DOCKER_IMAGE', defaultValue: 'sriharshitha88/blue-green-app', description: 'Docker image name')
         string(name: 'VERSION', defaultValue: '', description: 'Version tag (leave empty for git commit SHA)')
         choice(name: 'ENVIRONMENT', choices: ['production', 'staging'], description: 'Target environment')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false, description: 'Skip automated tests')
@@ -17,6 +17,37 @@ pipeline {
     }
 
     stages {
+        stage('Install Docker') {
+            steps {
+                script {
+                    sh '''
+                        # Install Docker
+                        apt-get update
+                        apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
+
+                        # Add Docker's official GPG key
+                        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+                        # Set up the repository
+                        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+                        # Install Docker Engine
+                        apt-get update
+                        apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+                        # Start Docker service
+                        service docker start
+
+                        # Install docker-compose
+                        curl -L "https://github.com/docker/compose/releases/download/v2.20.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+                        chmod +x /usr/local/bin/docker-compose
+
+                        echo "Docker installed successfully"
+                    '''
+                }
+            }
+        }
+
         stage('Preparation') {
             steps {
                 script {
