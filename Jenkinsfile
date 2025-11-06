@@ -85,14 +85,14 @@ pipeline {
                 script {
                     echo "Running container health test..."
 
-                    # Stop any existing containers on port 3000
+                    // Stop any existing containers on port 3000
                     echo "Checking for existing containers on port 3000..."
                     sh "docker ps -q --filter 'publish=3000' | xargs -r docker stop"
 
-                    # Wait a moment for ports to be released
+                    // Wait a moment for ports to be released
                     sleep 2
 
-                    # Start container in background
+                    // Start container in background
                     sh """
                         HEALTH_STATUS=\$(docker run --rm -d -p 3000:3000 ${env.IMAGE_TAG})
                         echo "Container started with ID: \$HEALTH_STATUS"
