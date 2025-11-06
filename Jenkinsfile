@@ -316,10 +316,13 @@ http {
 
                     // Reload Nginx
                     sh """
-                        # Start Nginx container if not running
-                        if ! docker ps | grep -q 'nginx'; then
-                            echo "Starting Nginx container..."
-                            docker run -d --name nginx -p 80:80 -v ${WORKSPACE}/nginx-temp.conf:${NGINX_CONFIG} nginx:alpine
+                        # Check if nginx container exists (running or stopped)
+                        if docker ps -a | grep -q 'nginx'; then
+                            echo "Nginx container exists, starting if stopped..."
+                            docker start nginx 2>/dev/null || true
+                        else
+                            echo "Creating new Nginx container..."
+                            docker run -d --name nginx -p 80:80 nginx:alpine
                         fi
 
                         # Update Nginx configuration
