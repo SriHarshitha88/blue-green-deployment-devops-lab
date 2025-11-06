@@ -337,11 +337,17 @@ http {
                         # Remove existing nginx container if it exists
                         docker rm -f nginx 2>/dev/null || true
 
+                        # Create a directory for nginx config
+                        mkdir -p ${WORKSPACE}/nginx-config
+
+                        # Copy config to the nginx config directory
+                        cp nginx-temp.conf ${WORKSPACE}/nginx-config/nginx.conf
+
                         # Create new nginx container with proper networking
                         echo "Creating Nginx container with custom configuration..."
                         docker run -d --name nginx \
                             -p 80:80 \
-                            -v ${WORKSPACE}/nginx-temp.conf:/etc/nginx/nginx.conf:ro \
+                            -v ${WORKSPACE}/nginx-config:/etc/nginx:ro \
                             --network bridge \
                             nginx:alpine
 
