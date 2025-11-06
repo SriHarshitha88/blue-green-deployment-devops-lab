@@ -68,11 +68,32 @@ pipeline {
                     // Health check test
                     sh """
                         echo "Running health check test..."
+                        echo "Starting container with image: ${env.IMAGE_TAG}"
+
+                        # Start container in background
                         HEALTH_STATUS=\$(docker run --rm -d -p 3000:3000 ${env.IMAGE_TAG})
-                        sleep 5
-                        curl -f http://localhost:3000/health || exit 1
-                        docker stop \$HEALTH_STATUS
-                        echo "Health check passed!"
+                        echo "Container started with ID: \$HEALTH_STATUS"
+
+                        # Wait for container to be ready
+                        echo "Waiting for container to start..."
+                        for i in {1..10}; do
+                            sleep 2
+                            if curl -f http://localhost:3000/health 2>/dev/null; then
+                                echo "Health check passed after \$((i*2)) seconds!"
+                                docker stop \$HEALTH_STATUS
+                                echo "Container stopped successfully"
+                                break
+                            else
+                                echo "Attempt \$i: Container not ready yet..."
+                                if [ \$i -eq 10 ]; then
+                                    echo "Health check failed after 20 seconds"
+                                    echo "Container logs:"
+                                    docker logs \$HEALTH_STATUS 2>&1 || true
+                                    docker stop \$HEALTH_STATUS || true
+                                    exit 1
+                                fi
+                            fi
+                        done
                     """
                 }
             }
@@ -145,28 +166,37 @@ pipeline {
                     // Wait for container to be healthy
                     def maxAttempts = 30
                     def attempt = 0
+                    def targetPort = env.TARGET_ENV == 'blue' ? 3001 : 3002
+
+                    echo "Checking health for ${env.TARGET_ENV} environment on port ${targetPort}"
 
                     while (attempt < maxAttempts) {
                         try {
                             def healthResponse = sh(
-                                script: "curl -f http://localhost:3001/health || curl -f http://localhost:3002/health",
+                                script: "curl -s http://localhost:${targetPort}/health",
                                 returnStdout: true
-                            )
+                            ).trim()
 
                             if (healthResponse.contains('"status":"healthy"')) {
-                                echo "Health check passed for ${env.TARGET_ENV} environment"
+                                echo "✅ Health check passed for ${env.TARGET_ENV} environment on attempt ${attempt + 1}"
+                                echo "Response: ${healthResponse}"
                                 break
+                            } else {
+                                echo "Health check attempt ${attempt + 1}: Invalid response"
                             }
                         } catch (Exception e) {
-                            echo "Health check attempt ${attempt + 1} failed"
+                            echo "Health check attempt ${attempt + 1} failed: ${e.getMessage()}"
                         }
 
                         attempt++
-                        sleep 5
+                        if (attempt < maxAttempts) {
+                            echo "Waiting 5 seconds before next attempt..."
+                            sleep 5
+                        }
                     }
 
                     if (attempt == maxAttempts) {
-                        error "Health check failed after ${maxAttempts} attempts"
+                        error "❌ Health check failed after ${maxAttempts} attempts for ${env.TARGET_ENV} environment"
                     }
                 }
             }
