@@ -215,7 +215,7 @@ http {
     }
 
     # Include other configurations from original file
-    $(cat nginx.conf | grep -A 200 'upstream blue_backend')
+    \$(cat nginx.conf | grep -A 200 'upstream blue_backend')
 }
 """
 
