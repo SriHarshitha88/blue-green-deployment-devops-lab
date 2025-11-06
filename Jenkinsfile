@@ -23,7 +23,7 @@ pipeline {
                     sh '''
                         echo "Cleaning up any containers from previous runs..."
                         # Stop docker-compose containers if running
-                        docker-compose down -v 2>/dev/null || true
+                        cd ${WORKSPACE} && docker-compose down -v 2>/dev/null || true
 
                         # Stop any containers using ports 3000, 3001, 3002
                         docker ps -q --filter "publish=3000" | xargs -r docker stop
@@ -70,7 +70,10 @@ pipeline {
             steps {
                 script {
                     sh """
-                        docker build -t ${env.IMAGE_TAG} .
+                        # Ensure we're in the right directory
+                        pwd
+                        ls -la Dockerfile || echo "Dockerfile not found in current directory"
+                        docker build -t ${env.IMAGE_TAG} ${WORKSPACE} || docker build -t ${env.IMAGE_TAG} .
                         echo "Image built successfully: ${env.IMAGE_TAG}"
                     """
                 }
@@ -180,6 +183,7 @@ pipeline {
                 script {
                     // Deploy to target environment
                     sh """
+                        cd ${WORKSPACE}
                         # Stop target environment container if running
                         docker-compose stop app-${env.TARGET_ENV} || true
 
@@ -389,7 +393,7 @@ http {
                         fi
 
                         # Stop failed deployment
-                        docker-compose stop app-${env.TARGET_ENV} || true
+                        cd ${WORKSPACE} && docker-compose stop app-${env.TARGET_ENV} || true
                     """
                 } catch (Exception e) {
                     echo "Rollback failed: ${e}"
